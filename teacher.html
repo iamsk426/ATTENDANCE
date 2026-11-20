@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Attendance — Teacher</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f4f6f8; color: #1d2433; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+    .card { background: #fff; border-radius: 16px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 18px; }
+    h1 { margin: 0 0 4px; font-size: 24px; }
+    .muted { color: #5b6475; font-size: 14px; }
+    input { font-size: 16px; padding: 10px 12px; border: 1.5px solid #cfd6e0; border-radius: 8px; }
+    button { font-size: 16px; font-weight: 600; padding: 11px 18px; border: 0; border-radius: 8px; background: #2f6fed; color: #fff; cursor: pointer; }
+    button.secondary { background: #e8edf5; color: #1d2433; }
+    button.danger { background: #d23b3b; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .live { display: grid; grid-template-columns: auto 1fr; gap: 32px; align-items: center; }
+    #qr { background: #fff; padding: 16px; border-radius: 12px; border: 1px solid #e3e8ef; min-width: 300px; min-height: 300px; display: flex; align-items: center; justify-content: center; }
+    #qr img, #qr canvas { width: min(60vh, 520px) !important; height: auto !important; }
+    .count { font-size: 64px; font-weight: 700; line-height: 1; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 99px; font-size: 13px; font-weight: 600; }
+    .open { background: #e7f7ee; color: #0f6b3a; } .closed { background: #eef2f7; color: #5b6475; }
+    .err { color: #a12020; margin-top: 10px; }
+    .hidden { display: none; }
+    a { color: #2f6fed; }
+    @media (max-width: 720px) { .live { grid-template-columns: 1fr; } #qr img, #qr canvas { width: 80vw !important; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login" class="card">
+    <h1>Attendance — Teacher</h1>
+    <p class="muted">Enter your PIN to continue.</p>
+    <div class="row"><input id="pin" type="password" placeholder="PIN"><button id="loginBtn">Open</button></div>
+    <div id="loginErr" class="err"></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h1>Attendance <span id="state" class="pill closed">Closed</span></h1>
+          <div class="muted" id="stateText"></div>
+        </div>
+        <div class="row">
+          <input id="minutes" type="number" min="1" max="180" style="width:90px"> <span class="muted">min</span>
+          <button id="startBtn">Start attendance</button>
+          <button id="stopBtn" class="danger hidden">Stop</button>
+        </div>
+      </div>
+      <div id="netErr" class="err"></div>
+    </div>
+
+    <div class="card live">
+      <div id="qr"><span class="muted">Press “Start attendance” to show the QR code</span></div>
+      <div>
+        <div class="muted">Present today</div>
+        <div class="count" id="count">0</div>
+        <p class="muted" id="qrTimer"></p>
+        <p><a id="sheetLink" target="_blank" rel="noopener">Open attendance sheet ↗</a></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <b>Classroom location</b>
+      <p class="muted" id="roomText"></p>
+      <button id="roomBtn" class="secondary">Set classroom location from this device</button>
+      <p class="muted">Do this once from your <b>phone</b>, standing inside the classroom (laptops give poor GPS).</p>
+      <div id="roomErr" class="err"></div>
+    </div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script>
+  var PIN = '', qr = null, status = null, pollTimer = null, tickTimer = null;
+  var STUDENT_URL = new URL('./', location.href).href;   // index.html in the same folder
+  function $(id) { return document.getElementById(id); }
+
+  function call(payload, onOk, onErr) {
+    payload.pin = PIN;
+    api(payload).then(function (res) {
+      if (res.ok) { $('netErr').textContent = ''; onOk(res.status); }
+      else (onErr || function (m) { $('netErr').textContent = m; })(res.msg);
+    }).catch(function (e) {
+      (onErr || function (m) { $('netErr').textContent = m; })('Could not reach the server: ' + e.message);
+    });
+  }
+
+  function render(s) {
+    status = s;
+    $('login').classList.add('hidden'); $('main').classList.remove('hidden');
+    $('sheetLink').href = s.sheetUrl;
+    $('count').textContent = s.presentToday;
+    if (!$('minutes').value) $('minutes').value = s.defaultMinutes;
+
+    $('state').textContent = s.open ? 'Open' : 'Closed';
+    $('state').className = 'pill ' + (s.open ? 'open' : 'closed');
+    $('startBtn').classList.toggle('hidden', s.open);
+    $('stopBtn').classList.toggle('hidden', !s.open);
+    $('stateText').textContent = s.open
+      ? 'Open until ' + new Date(s.sessionUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : 'Students cannot mark attendance right now.';
+
+    if (s.geoMode === 'off') {
+      $('roomText').textContent = 'Location check is turned off (GEO_MODE = off).';
+    } else if (s.room) {
+      $('roomText').textContent = 'Set ✓ (' + s.room.lat.toFixed(5) + ', ' + s.room.lng.toFixed(5) + ', ±' + s.room.acc +
+        ' m). Students must be within ' + s.radius + ' m. Mode: ' + s.geoMode + '.';
+    } else {
+      $('roomText').innerHTML = '<span style="color:#a12020">Not set yet — location is not being checked.</span>';
+    }
+
+    var box = $('qr');
+    if (s.open) {
+      var url = STUDENT_URL + '?t=' + encodeURIComponent(s.token);
+      if (!qr) { box.innerHTML = ''; qr = new QRCode(box, { text: url, width: 512, height: 512, correctLevel: QRCode.CorrectLevel.M }); }
+      else { qr.makeCode(url); }
+      schedule(s.msToNextQr + 300);
+    } else {
+      qr = null; box.innerHTML = '<span class="muted">Press “Start attendance” to show the QR code</span>';
+      $('qrTimer').textContent = '';
+      schedule(30000);
+    }
+  }
+
+  function schedule(ms) {
+    clearTimeout(pollTimer); clearInterval(tickTimer);
+    var due = Date.now() + ms;
+    pollTimer = setTimeout(refresh, ms);
+    if (status && status.open) {
+      tickTimer = setInterval(function () {
+        $('qrTimer').textContent = 'QR code changes in ' + Math.max(0, Math.ceil((due - Date.now()) / 1000)) + ' s';
+      }, 500);
+    }
+  }
+
+  function refresh() { call({ action: 'status' }, render, function (m) { $('netErr').textContent = m; schedule(5000); }); }
+
+  function login() {
+    PIN = $('pin').value.trim();
+    $('loginErr').textContent = 'Checking…';
+    call({ action: 'status' }, function (s) {
+      $('loginErr').textContent = '';
+      try { sessionStorage.setItem('att_pin', PIN); } catch (e) {}
+      render(s);
+    }, function (m) { $('loginErr').textContent = m; });
+  }
+  $('loginBtn').onclick = login;
+  $('pin').onkeydown = function (e) { if (e.key === 'Enter') login(); };
+  $('startBtn').onclick = function () { call({ action: 'start', minutes: Number($('minutes').value) }, render); };
+  $('stopBtn').onclick = function () { call({ action: 'stop' }, render); };
+
+  $('roomBtn').onclick = function () {
+    $('roomErr').textContent = 'Getting location…';
+    if (!navigator.geolocation) { $('roomErr').textContent = 'This browser cannot share location.'; return; }
+    navigator.geolocation.getCurrentPosition(function (p) {
+      $('roomErr').textContent = '';
+      call({ action: 'setRoom', lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }, render,
+        function (m) { $('roomErr').textContent = m; });
+    }, function (e) {
+      $('roomErr').textContent = 'Could not get location: ' + e.message + '. Allow location for this page and try again.';
+    }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  };
+
+  try { var saved = sessionStorage.getItem('att_pin'); if (saved) { $('pin').value = saved; login(); } } catch (e) {}
+</script>
+</body>
+</html>

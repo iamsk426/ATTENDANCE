@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mark attendance</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f4f6f8; color: #1d2433; }
+    .card { max-width: 420px; margin: 24px auto; background: #fff; border-radius: 16px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    p.sub { margin: 0 0 20px; color: #5b6475; font-size: 15px; }
+    label { display: block; font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+    input { width: 100%; font-size: 18px; padding: 12px 14px; border: 1.5px solid #cfd6e0; border-radius: 10px; }
+    input:focus { outline: none; border-color: #2f6fed; }
+    button { width: 100%; margin-top: 22px; font-size: 18px; font-weight: 600; padding: 14px; border: 0; border-radius: 10px; background: #2f6fed; color: #fff; }
+    button:disabled { opacity: .6; }
+    .link { background: none; color: #2f6fed; font-size: 14px; font-weight: 500; margin-top: 14px; padding: 6px; }
+    .who { background: #f0f4ff; border-radius: 10px; padding: 14px; font-size: 16px; }
+    .msg { margin-top: 18px; padding: 14px; border-radius: 10px; font-size: 16px; display: none; }
+    .ok { background: #e7f7ee; color: #0f6b3a; }
+    .err { background: #fdecec; color: #a12020; }
+    .info { background: #eef2f7; color: #354052; }
+    .big { font-size: 56px; text-align: center; margin: 8px 0; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Class attendance</h1>
+    <p class="sub" id="sub">Mark yourself present</p>
+
+    <div id="regForm" class="hidden">
+      <label for="roll">Roll number</label>
+      <input id="roll" autocomplete="off" autocapitalize="characters" placeholder="e.g. 23CS045">
+      <label for="mobile">Mobile number</label>
+      <input id="mobile" type="tel" inputmode="numeric" maxlength="10" placeholder="10-digit mobile">
+      <button id="regBtn">Mark me present</button>
+      <p class="sub" style="margin-top:12px;font-size:13px">This phone will remember you, so next time you only need to scan.</p>
+    </div>
+
+    <div id="known" class="hidden">
+      <div class="who" id="whoText"></div>
+      <button id="markBtn">Mark me present</button>
+      <button class="link" id="changeBtn">Not you? Change details</button>
+    </div>
+
+    <div id="done" class="hidden"><div class="big">✅</div></div>
+    <div id="msg" class="msg"></div>
+  </div>
+
+<script src="config.js"></script>
+<script>
+  var PASS = '', GEO_MODE = 'block';
+
+  function $(id) { return document.getElementById(id); }
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  function show(id, on) { $(id).classList.toggle('hidden', !on); }
+  function message(text, kind) { var m = $('msg'); m.textContent = text; m.className = 'msg ' + kind; m.style.display = text ? 'block' : 'none'; }
+  function buttons(on) { document.querySelectorAll('button').forEach(function (b) { b.disabled = !on; }); }
+
+  function deviceId() {
+    var id = store('att_device');
+    if (!id) {
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+         : 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+      store('att_device', id);
+    }
+    return id;
+  }
+  function profile() { try { return JSON.parse(store('att_profile') || 'null'); } catch (e) { return null; } }
+
+  function getLocation() {
+    return new Promise(function (resolve) {
+      if (GEO_MODE === 'off') return resolve({});
+      if (!navigator.geolocation) return resolve({ geoError: 'not supported' });
+      navigator.geolocation.getCurrentPosition(
+        function (p) { resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }); },
+        function (e) { resolve({ geoError: ['', 'permission denied', 'unavailable', 'timeout'][e.code] || 'error' }); },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    });
+  }
+
+  function submit(roll, mobile) {
+    buttons(false);
+    message(GEO_MODE === 'off' ? 'Submitting…' : 'Checking your location… (allow location if asked)', 'info');
+    getLocation().then(function (loc) {
+      message('Submitting…', 'info');
+      return api({ action: 'submit', pass: PASS, roll: roll, mobile: mobile, deviceId: deviceId(),
+                   lat: loc.lat, lng: loc.lng, acc: loc.acc, geoError: loc.geoError });
+    }).then(function (res) {
+      buttons(true);
+      if (res.ok) {
+        store('att_profile', JSON.stringify({ roll: roll.toUpperCase(), mobile: mobile }));
+        show('regForm', false); show('known', false); show('done', true);
+        $('sub').textContent = 'Roll no. ' + roll.toUpperCase();
+        message(res.msg, 'ok');
+      } else {
+        message(res.msg, 'err');
+      }
+    }).catch(function (err) {
+      buttons(true);
+      message('Could not reach the server (' + err.message + '). Check your internet and tap the button again.', 'err');
+    });
+  }
+
+  function showRegForm() { show('known', false); show('regForm', true); }
+
+  $('regBtn').onclick = function () {
+    var roll = $('roll').value.trim(), mobile = $('mobile').value.replace(/\D/g, '');
+    if (!roll) return message('Please enter your roll number.', 'err');
+    if (!/^[6-9]\d{9}$/.test(mobile)) return message('Please enter a valid 10-digit mobile number.', 'err');
+    submit(roll, mobile);
+  };
+  $('changeBtn').onclick = function () { message('', 'info'); showRegForm(); };
+
+  (function init() {
+    var token = new URLSearchParams(location.search).get('t');
+    if (!token) { message('Please scan the QR code shown in class.', 'err'); return; }
+    message('Opening…', 'info');
+    api({ action: 'scan', token: token }).then(function (res) {
+      if (!res.ok) { message(res.msg, 'err'); return; }
+      PASS = res.pass; GEO_MODE = res.geoMode;
+      try { history.replaceState(null, '', location.pathname); } catch (e) {}
+      message('', 'info');
+      var p = profile();
+      if (p && p.roll && p.mobile) {
+        $('whoText').textContent = 'Roll no. ' + p.roll + ' · mobile ••••' + String(p.mobile).slice(-4);
+        $('markBtn').onclick = function () { submit(p.roll, p.mobile); };
+        show('known', true);
+        submit(p.roll, p.mobile);   // registered phones are marked automatically on scan
+      } else {
+        showRegForm();
+      }
+    }).catch(function (err) {
+      message('Could not reach the server (' + err.message + '). Check your internet and scan again.', 'err');
+    });
+  })();
+</script>
+</body>
+</html>
